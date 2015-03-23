@@ -34,7 +34,7 @@ out <- do.call(rbind,out)
 out <- out[!is.na(method),]
 
 # write.csv(out, file="~/R/QES2/data/closed_ifps.csv")
-
+out <- data.table(read.csv("~/R/QES2/data/closed_ifps.csv"))
 
 ifp.key <- as.data.table(read.csv(file.path(path.mydata, "ifp_key.csv")))
 setkey(ifp.key, ifp_idx)
@@ -77,7 +77,7 @@ data.ifp[,prob:=round(CDF(dist, cut.num, par.1, par.2),2),by=row.id]
 
 
 data.ifp[,list(ifp_idx,dist,type,par.1,par.2,val.num,cut.num,prob,fcast.date)]
-data.ifp[ifp_idx=="1410-0",list(ifp_idx,dist,type,par.1,par.2,val.num,cut.num,prob,fcast.date)]
+data.ifp[ifp_idx=="1412-0",list(ifp_idx,dist,type,par.1,par.2,val.num,cut.num,prob,fcast.date)]
 
 
 
@@ -87,10 +87,21 @@ data.ifp[,BS:=round((CDF(dist, cut.num, par.1, par.2)-(val.num<cut.num)^2),2),by
 
 #### History
 
-con.hist <- FcastHistConsensus(use.closed = TRUE,
-                               q.status   = "closed",
-                               end.date   = Sys.Date())
+# con.hist <- FcastHistConsensus(use.closed = TRUE,
+#                                q.status   = "closed",
+#                                end.date   = Sys.Date())
+# 
+# con.hist <- consensus.hist[!is.na(fcast.date),]
 
-con.hist <- consensus.hist[!is.na(fcast.date),]
+# write.csv(con.hist, file.path(path.mydata,"con.hist.csv"))
+con.hist <- data.table(read.csv(file.path(path.mydata,"con.hist.csv")))
+con.hist
 
-write.csv(con.hist, file.path(path.mydata,"con.hist.csv"))
+
+con.hist[,unique(ifp_id)]
+con.hist[ifp_id=="1410-0"]
+con.hist <- con.hist[,list(ifp_id, fcast.date, dist, par.1, par.2, q_50, method)]
+
+tmp <- con.hist[ifp_id=="1410-0",]
+tmp
+IFP.res
