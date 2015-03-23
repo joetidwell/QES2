@@ -18,6 +18,7 @@ source("~/ACE/global_vars.R")
 
 # Util funcs
 # Switchable generic cumulative distribution function
+
 CDF <- function(dist.name, ...) {
   return(
     switch(dist.name,
@@ -150,3 +151,8 @@ ggplot(norm.out, aes(x=ifp_id,y=score,color=method, size=method, shape=method)) 
   lum.data <- data.table(read.csv("~/Downloads/lum.csv"))
 
   lum.data
+
+
+closed.ifps <- data.table(read.csv(file.path(path.data,"closed_ifps.csv")))
+closed.ifps
+

@@ -10,7 +10,9 @@ source(file.path(kRootPath, "fitting", "interval_fitting_funcs.R"), chdir=T)
 source(file.path(kRootPath, "forecast", "method_consensus_dist.R"), chdir=T)
 
 options(stringsAsFactors = FALSE)
-path.mydata <- "~/R/QES2/data"
+# path.mydata <- "~/R/QES2/data"
+path.mydata <- "~/git/QES2/data"
+
 
 ifp.key <- as.data.table(read.csv(file.path(path.mydata, "ifp_key.csv")))
 setkey(ifp.key, ifp_idx)
@@ -87,7 +89,7 @@ ggplot(con.hist, aes(x=roll.date, y=BS, color=type, group=type)) +
   theme_classic()
 
 
-save(con.hist, file=file.path(path.mydata,"con.hist.Rdata"))
+# save(con.hist, file=file.path(path.mydata,"con.hist.Rdata"))
 load(file.path(path.mydata,"con.hist.Rdata"))
 
 
@@ -109,20 +111,30 @@ ggplot(pdata.MDBS, aes(x=type, y=median)) +
 
 bs.methods <- data.table(read.csv("~/ACE/data/scoring/bs_methods_ifp.yr4.csv"))
 setkey(bs.methods, ifp_id)
-
 bs.methods <- bs.methods[ifp_id%in%unique(con.hist$ifp_id),]
-MDBS[,score:=BS]
 bs.methods[,type:="GJP Aggregation"]
 
-pdata <- rbind(MDBS[type %in% c("fixed","random","user"),list(ifp_id,type,score)], bs.methods[,list(ifp_id,type,score)])
+MDBS[,score:=BS]
+MDBS[,method:=type]
+
+pdata <- rbind(MDBS[type %in% c("fixed","random","user"),list(ifp_id,type,score,method)], bs.methods[,list(ifp_id,type,score,method)])
+pdata[, type:=factor(type, levels=c("fixed","random","user","GJP Aggregation"), labels=c("Theta-M: Fixed", "Theta-M: Random", "Theta-M: User","GJP Aggregation"))]
+
+pdata <- pdata[rev(order(method)),][ifp_id!="1425-0",]
 
 ggplot(pdata, aes(x=ifp_id,y=score, color=type, size=type, shape=type)) +
   geom_point() +
-  scale_size_manual(name="Methods", values=c(2,4,4,4)) +
-  scale_shape_manual(name="Methods", values=c(1,16,16,16)) +
-  scale_color_manual(name="Methods", values=c("#BBBBBB","firebrick","steelblue","forestgreen")) +
+  scale_size_manual(name="Methods", values=c(4,4,4,2)) +
+  scale_shape_manual(name="Methods", values=c(16,16,16,1)) +
+  scale_color_manual(name="Methods", values=c("firebrick","steelblue","forestgreen","#BBBBBB")) +
   labs(x="IFP", y="Mean Daily Brier Score") +
-  theme_classic()
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(legend.justification=c(1,1), legend.position=c(1,1))
+
+pdata2 <- pdata[,list(score=median(score)),by=c("method","type")]
+ggplot(pdata2, aes(x=type, y=score, color=type, size=type, shape=type)) +
+  geom_point()
 
 
 roll.date <- date.from + 10
