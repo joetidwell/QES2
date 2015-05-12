@@ -87,26 +87,41 @@ ggplot(con.hist, aes(x=roll.date, y=BS, color=type, group=type)) +
   geom_line() +
   facet_wrap(~ifp_id, scale="free_x") +
   theme_classic()
-
+ggsave("~/Desktop/consensus_history.pdf",width=11,height=8.5)
 
 # save(con.hist, file=file.path(path.mydata,"con.hist.Rdata"))
 load(file.path(path.mydata,"con.hist.Rdata"))
 
 
+
+exclude <- c(1498,1484,1506,1507,1469,1416)
+exclude <- paste0(exclude,"-0")
 #### Get mean daily brier scores
 
+unique(con.hist$ifp_id)%in%exclude
+
+con.hist[ifp_id!="1415-0" & ifp_id!="1416-0",mean(BS),by=("type","ifp_id")]
+con.hist[ifp_id=="1425-0",BS:=2*(prob-1)^2]
+
 MDBS <- con.hist[,list(BS=mean(BS)),by=c("ifp_id","type")]
-ggplot(MDBS[type %in% c("fixed","random","user"),], aes(x=type, y=BS)) +
-  geom_boxplot() +
+p <- ggplot(MDBS[type %in% c("fixed","random","user"),], aes(x=type, y=BS)) +
+  geom_boxplot(notch=TRUE) +
   theme_classic()
+gg <- ggplot_build(p)
+
+pdata.MDBS <- MDBS[type %in% c("fixed","random","user"),list(median=median(BS), se=1.253*sd(BS)/sqrt(.N)),by=type]
+
+pdata.MDBS <- MDBS[type %in% c("fixed","random","user"),list(median=mean(BS), se=sd(BS)/sqrt(.N)),by=type]
 
 
-pdata.MDBS <- MDBS[type %in% c("fixed","random","user"),list(median=median(BS), se=1.253*sd(BS)/.N),by=type]
+pdata.MDBS[,type:=factor(type, levels=c("fixed","random","user"), labels=c("Fixed","Random","User"))]
 
 ggplot(pdata.MDBS, aes(x=type, y=median)) +
   geom_point() +
   geom_errorbar(aes(ymax=median+se, ymin=median-se), width=.2) +
-  theme_classic()
+  theme_classic() +
+  # ylim(c(.15,.6)) +
+  labs(x="Experimental Condition", y="Median BS (w/ SE)")
 
 
 bs.methods <- data.table(read.csv("~/ACE/data/scoring/bs_methods_ifp.yr4.csv"))
@@ -117,16 +132,21 @@ bs.methods[,type:="GJP Aggregation"]
 MDBS[,score:=BS]
 MDBS[,method:=type]
 
-pdata <- rbind(MDBS[type %in% c("fixed","random","user"),list(ifp_id,type,score,method)], bs.methods[,list(ifp_id,type,score,method)])
-pdata[, type:=factor(type, levels=c("fixed","random","user","GJP Aggregation"), labels=c("Theta-M: Fixed", "Theta-M: Random", "Theta-M: User","GJP Aggregation"))]
+# pdata <- rbind(MDBS[type %in% c("fixed","random","user"),list(ifp_id,type,score,method)], bs.methods[,list(ifp_id,type,score,method)])
+# pdata[, type:=factor(type, levels=c("fixed","random","user","GJP Aggregation"), labels=c("Theta-M: Fixed", "Theta-M: Random", "Theta-M: User","GJP Aggregation"))]
 
-pdata <- pdata[rev(order(method)),][ifp_id!="1425-0",]
+pdata <- rbind(MDBS[,list(ifp_id,type,score,method)], bs.methods[,list(ifp_id,type,score,method)])
+pdata[, type:=factor(type, levels=c("fixed","random","user","rolling","rollingCtl","GJP Aggregation"), labels=c("Theta-M: Fixed", "Theta-M: Random", "Theta-M: User", "Theta-M: Rolling", "Theta-M: Rolling Ctl", "GJP Aggregation"))]
+
+unique(pdata$type)
+
+pdata <- pdata[rev(order(type)),]
 
 ggplot(pdata, aes(x=ifp_id,y=score, color=type, size=type, shape=type)) +
   geom_point() +
-  scale_size_manual(name="Methods", values=c(4,4,4,2)) +
-  scale_shape_manual(name="Methods", values=c(16,16,16,1)) +
-  scale_color_manual(name="Methods", values=c("firebrick","steelblue","forestgreen","#BBBBBB")) +
+  scale_size_manual(name="Methods", values=c(4,4,4,4,4,2)) +
+  scale_shape_manual(name="Methods", values=c(16,16,16,16,16,1)) +
+  scale_color_manual(name="Methods", values=c("firebrick","steelblue","forestgreen","darkviolet","tomato2","#BBBBBB")) +
   labs(x="IFP", y="Mean Daily Brier Score") +
   theme_classic() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
@@ -135,6 +155,30 @@ ggplot(pdata, aes(x=ifp_id,y=score, color=type, size=type, shape=type)) +
 pdata2 <- pdata[,list(score=median(score)),by=c("method","type")]
 ggplot(pdata2, aes(x=type, y=score, color=type, size=type, shape=type)) +
   geom_point()
+
+ggplot(bs.methods, aes(x=score)) +
+  geom_histogram(fill="#CCCCCC",color="black") +
+  coord_cartesian(xlim=c(0,1),ylim=c(0,135)) +
+  geom_vline(xintercept=mean(con.hist$BS), color="firebrick", size=2)
+
+ggplot(bs.methods, aes(x=score)) +
+  geom_histogram(fill="#CCCCCC",color="black") +
+  coord_cartesian(xlim=c(0,1),ylim=c(0,135)) +
+  geom_vline(xintercept=mean(con.hist[,mean(BS),by=type]$V1), color="firebrick", size=2)
+unique(bs.methods$method)
+
+mean(bs.methods$score)
+
+ggplot(bs.methods, aes(x=score)) +
+  geom_vline(data=con.hist[,list(condition=mean(BS)),by=type],
+             aes(xintercept=condition, color=type)) +
+  stat_ecdf() +
+  coord_cartesian(xlim=c(0,1.3),ylim=c(0,1.1)) 
+
+ggplot(bs.methods, aes(x=score)) +
+  geom_vline(xintercept=mean(con.hist$BS)) +
+  stat_ecdf() +
+  coord_cartesian(xlim=c(0,1.3),ylim=c(0,1.1)) 
 
 
 roll.date <- date.from + 10
