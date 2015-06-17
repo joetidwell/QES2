@@ -45,13 +45,6 @@ IFP.res <- rbind(IFP.res,list("1457-0","2100-01-01","date"))
 IFP.res <- rbind(IFP.res,list("1457-0","2100-01-01","date"))
 
 
-
-
-
-
-
-
-
 # fcasts <- LoadContinuousFcasts(q.status=c("active","closed"))
 
 # save(fcasts, file=file.path(path.mydata,"fcasts.Rdata"))
