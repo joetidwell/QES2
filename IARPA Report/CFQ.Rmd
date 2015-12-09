@@ -1,0 +1,982 @@
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, warning=FALSE, message=FALSE, results='hide')
+```
+
+# CFQ Analyses for IARPA Final Report
+**Creator(s)**: _Joe Tidwell_
+**Date**: _20150618_
+
+```{r setup, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+library(ggplot2)
+library(foreach)
+library(doMC)
+# library("multicore", quietly=TRUE)
+# registerDoMC(max(multicore:::detectCores()-6,2)) # use all cores minus 2
+registerDoMC(28)
+
+source("~/ACE/global_vars.R")
+source(file.path(kRootPath, "util", "load_data.R"), chdir=T)
+source(file.path(kRootPath, "fitting", "interval_fitting_funcs.R"), chdir=T)
+source(file.path(kRootPath, "forecast", "method_consensus_dist.R"), chdir=T)
+
+options(stringsAsFactors = FALSE)
+path.mydata <- "~/git/QES2/data"
+```
+
+
+
+```{r}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Generic Functions
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+# Switchable generic cumulative distribution function
+CDF <- function(dist.name, ...) {
+  return(
+    switch(dist.name,
+           normal = pnorm(...),
+           beta   = pbeta(...),
+           gamma  = pgamma(...)
+    )
+  )
+}
+
+# Switchable generic density function
+PDF <- function(dist.name, ...) {
+  return(
+    switch(dist.name,
+           normal = dnorm(...),
+           beta   = dbeta(...),
+           gamma  = dgamma(...)
+    )
+  )
+}
+
+
+# Generic Inverse Cumulative Distribution Function
+QDF <- function(dist.name, ...){
+  switch(dist.name,
+         normal = qnorm(...),
+         beta   = qbeta(...),
+         gamma  = qgamma(...)
+  )
+}
+
+# Generic Sampler
+RDF <- function(dist.name, ...){
+  switch(dist.name,
+         normal = rnorm(...),
+         beta   = rbeta(...),
+         gamma  = rgamma(...)
+  )
+}
+```
+
+
+```{r}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Get set of closed IFPS
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Get closed IFPs
+ifp.key <- as.data.table(read.csv(file.path(path.mydata, "ifp_key-SV.csv")))
+ifp.key <- ifp.key[status=="closed",]
+setkey(ifp.key, ifp_idx)
+ifp.data <- as.data.table(read.csv(file.path(kRootPath, "data", "ifps", "ifps.yr4.csv")))
+ifp.data <- ifp.data[, list(ifpid, q_status, q_type, date_closed)]
+setkey(ifp.data, ifpid)
+
+ifp.data <- ifp.data[ifp.key][date_closed!="NULL"]
+
+
+ifp.data[,ifp_id:=paste(ifpid,q_type,sep="-")]
+ifp.data <- ifp.data[q_status=="closed",]
+ifp.data[, date_closed:=as.Date(date_closed)-1]
+
+# Get resolution values
+IFP.res <- data.table(read.csv(file.path(path.mydata,"lum_ifp_data.csv")))
+IFP.res[,IFPID:=as.character(IFPID)]
+ifp.data[, ifpid:=as.character(ifpid)]
+setkey(IFP.res, IFPID)
+setkey(ifp.data,ifpid)
+
+ifp.data <- IFP.res[,list(IFPID,Outcome)][ifp.data]
+```
+
+```{r}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Data Wrangling
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+load(file.path(path.mydata,"allfits.Rdata"))
+fcasts <- all.fits
+
+# Only non-roller conditions
+fcasts  <- fcasts[!(type%in%c("rolling","rollingCtl"))] 
+
+# for some reason 1448 is duplicated
+tmp <- ifp.data[IFPID=="1448"][1]
+ifp.data <- cbind(ifp.data[IFPID!="1448"],tmp)
+
+# merge with ifp.data
+# ifp.data <- ifp.data[IFPID!="1419"]
+setkey(fcasts, ifp_idx)
+setkey(ifp.data, IFPID)
+fcasts <- ifp.data[fcasts]
+
+names.bins <- grep("bin_", names(fcasts), fixed=TRUE, value=TRUE)
+names.ctpts <- grep("ctpt_", names(fcasts), fixed=TRUE, value=TRUE)
+
+# Convert date outcomes to numeric
+fcasts[dist=="gamma" & Outcome!="",Outcome:=as.numeric(as.Date(Outcome))]
+fcasts[, Outcome:=as.numeric(Outcome)]
+
+# Remove any foracsts without specified outcomes
+# fcasts <- fcasts[!is.na(Outcome),]
+# fcasts[,Outcome:=as.numeric(Outcome)]
+
+
+# Error
+fcasts[,SS.tot:=2*apply(fcasts[,.SD,.SDcols=names.ctpts],1,var,na.rm=TRUE)]
+fcasts[, SS.fit := SS.tot - sse]
+fcasts[, R.sq := 1-(sse/SS.tot)]
+
+
+# c(length(fcasts[,unique(IFPID)])) 
+
+
+# c(fcasts[,unique(IFPID)][,.N], 
+#   fcasts[,.N], fcasts[,mean(R.sq)], fcasts[sse!=42,.N], fcasts[R.sq<=0,.N],
+#   )
+
+
+```
+
+## Raw Data Summary
+
+
+|                          |                                                          |
+|--------------------------|----------------------------------------------------------|
+| Unique IFPs              | `r length(fcasts[,unique(IFPID)])`                       |
+| Closed (scorable) IFPS   | `r ifp.data[Outcome!="", .N]`                            |
+| Unique Forecasters       | `r length(fcasts[,unique(user_id)])`                     |
+| Unique Forecasts         | `r fcasts[,.N]`                                          |
+| Unfittable Forecasts     | `r fcasts[sse==42,.N]`                                   |
+| % Unfittable             | `r round(fcasts[sse==42,.N]/fcasts[,.N],4)*100`          |
+| Mean $R^2$               | `r fcasts[,mean(R.sq)]`                                  |
+| # $R^2 < 0$              | `r fcasts[R.sq<0,.N]`                                    |
+| % $R^2 < 0$              | `r round(fcasts[R.sq<0,.N]/fcasts[,.N],4)*100`           |
+| # Forecasts after closed | `r fcasts[as.Date(date_closed)<=as.Date(fcast_date),.N]` |
+|                          |                                                          |
+
+
+```{r}
+# Drop 'unfittable'
+fcasts <- fcasts[sse!=42,]
+# Drop neg Rsq
+fcasts <- fcasts[R.sq>0,]
+
+# Adjust outcome (true.score) for date IFPs by date forecast made, and betas
+fcasts[value_type=="date" & !is.na(Outcome) ,true.score:=Outcome-as.numeric(as.Date(fcast_date))]
+fcasts[value_type!="date",true.score:=Outcome]
+fcasts[dist=="beta",true.score:=Outcome/100]
+
+
+# Drop forecasts made after close
+fcasts <- fcasts[as.Date(date_closed)>=as.Date(fcast_date)]
+
+# FOR SOME REASON MANY DATE FORECASTS HAVE NEGATIVE CUTPOINTS... WTF? FIND OUT WHY
+fcasts <- fcasts[!(dist=="gamma" & ctpt_0<0)]
+
+# fcasts <- fcasts[!is.na(true.score)]
+
+```
+
+```{r, eval=FALSE}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### CRPS
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+scaleUnit <- function(x) {
+  (x-min(x, na.rm=TRUE))/(max(x, na.rm=TRUE)-min(x, na.rm=TRUE))
+}
+
+GneitingCRPS <- function(distribution,par.1,par.2,true.score,n=1e6) {
+  X <- RDF(distribution,n,par.1,par.2)
+  X.prime <- RDF(distribution,n,par.1,par.2)
+  mean(abs(X-true.score))-.5*mean(abs(X-X.prime))
+}
+
+out <- foreach(i=1:nrow(fcasts[!is.na(true.score)])) %dopar% {
+  fcasts[i,GneitingCRPS(dist,par.1,par.2,true.score,n=1e6)]
+}
+fcasts[!is.na(true.score),S.R:=unlist(out)]
+fcasts[!is.na(true.score), S.R.r := scaleUnit(rank(S.R)),by=ifp_id]
+
+# save.image()
+
+tmp <- fcasts[!is.na(true.score),S.R,by=c("screen_name","ifp_id","type","dist")]
+tmp[,y:=scaleUnit(rank(S.R)),by=ifp_id]
+
+library(lme4)
+mod <- lmer(y~factor(type) + (1|ifp_id) + (1|dist), data=tmp)
+summary(lm(y~type,tmp))
+summary(mod)
+tmp[,mean(y),by=c("type")]
+
+unique(tmp$ifp_id)
+
+
+tmp2 <- fcasts[!is.na(true.score),S.R,by=c("screen_name","ifp_id","type","dist","par.1","par.2")]
+tmp2[,idx:=1:.N]
+tmp2[,QDF(dist,.5,par.1,par.2),by=idx]
+l
+
+```
+
+```{r, eval=FALSE}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Consensus
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+fcasts.closed <- fcasts[!is.na(Outcome)]
+
+# First get 'Daily' forecasts
+getDailySet <- function(fcasts, 
+                        ifp,
+                        decay.recent=.5, 
+                        decay.min.days=3) {
+  myifp <- fcasts[ifp_id==ifp,]
+  bin.id <- paste0("bin_",1:13)
+  ctpt.id <- paste0("ctpt_",1:12)
+
+  min.date <- myifp[,min(as.Date(fcast_date))]
+  max.date <- myifp[,as.Date(date_closed[1])]
+
+
+  # Get distributions for every live day of the forecast
+  roll <- foreach(d=seq.Date(min.date,max.date,"day")) %dopar% {
+    # filter to forecasts made on or before d
+    tmp <- myifp[as.Date(fcast_date)<=d,]
+
+    # Keep only the most recent forecast by each user
+    setkey(tmp, fcast_date)
+    tmp <- tmp[idx %in% tmp[, list(last_fcast = tail(idx,n = 1)),
+               by=user_id]$last_fcast]
+
+    # get N by condition
+    N <- tmp[,.N,by=type]
+    # Keep only the newest forecasts
+    # Either by using the decay.recent parameter and keeping the most recent X% of forecasts
+    N[, n.keep.decay:=as.integer(N*decay.recent)]
+    # or the number of forecasts made in the last N days as specificed by decay.min.days
+    N[, n.keep.daymin:= tmp[,sum(as.Date(fcast_date)>(d-decay.min.days)),by=type]$V1]
+    # whichever is larger
+    N[, n.keep := max(n.keep.decay, n.keep.daymin),by=type]
+    # unless N <= 5
+    N[, n.keep:=ifelse(N<=5,N,n.keep)]
+    N[, first:=(N-n.keep)+1]
+    N[, last:=N]
+    setkey(N,type)
+    # print(N)
+    tmp2 <- tmp[0,]
+    for(condition in N$type) {
+        tmp2 <- rbind(tmp2,tmp[type==condition,][N[condition,]$first:N[condition,]$last,])    
+    }
+    tmp2[,.N,by=type]
+    tmp <- tmp2
+    tmp[,roll.date:=d]
+  }
+  do.call(rbind,roll)
+}
+
+daily.set <- foreach(ifp=unique(fcasts.closed$ifp_id), .combine="rbind") %dopar% {
+  getDailySet(fcasts, ifp)
+}
+
+daily.set[,fcast_date:=as.Date(fcast_date)]
+
+updateGammas <- function(daily.set, n.bins=20) {
+  # Subset to forecasts that need to be updated
+  # forecasts made on the same day as the roll date are fine
+  # and only gammas are updated
+  updates <- daily.set[dist=="gamma" & (fcast_date!=roll.date),]
+
+  # Define refitting cutpoints for each forecast
+  ctpts <- data.table(matrix(NA_real_, nrow=nrow(updates), ncol=n.bins))
+  bins <- copy(ctpts)
+  bin.id <- paste0("bin_",1:20)
+  ctpt.id <- paste0("ctpt_",1:20)
+  setnames(ctpts, ctpt.id)
+  setnames(bins, bin.id)
+  updates <- cbind(updates[,list(idx,ifp_id,dist,par.1,par.2,fcast_date, roll.date, type)],bins,ctpts)  
+  updates[, row.id:=1:.N]  
+
+  # Obtain probabilities for each bin
+  updates[,c(bin.id):=as.list((pgamma(seq(roll.date-fcast_date, 
+                                       qgamma(.9999,par.1,par.2), 
+                                       length=20),par.1,par.2) - 
+                                pgamma(roll.date-fcast_date, par.1, par.2)) / 
+                                as.numeric(1-pgamma(roll.date-fcast_date, par.1, par.2))),
+       by=row.id]
+
+  # Convert to interval probabilities     
+  updates[,c(bin.id):=as.list(updates[,bin.id,with=FALSE] - 
+                              cbind(0,updates[,bin.id[-length(bin.id)],with=FALSE]))]
+
+  # Get cutpoints
+  updates[,c(ctpt.id):=as.list(seq(as.numeric(roll.date-fcast_date), 
+                                   qgamma(.9999,par.1,par.2), 
+                                   length=20)-as.numeric(roll.date-fcast_date)),
+           by=row.id]
+
+  # Drop unnecessary 1st ctpt/bin
+  updates[,bin_1:=NULL]
+  updates[,ctpt_1:=NULL]
+
+  # refit parameters to new, renormed probabilities
+  new.fits <- foreach(i=1:nrow(updates)) %dopar% {
+    bin.vals <- unlist(updates[i, .SD, .SDcols=bin.id[-1]])
+    ctpt.vals <- unlist(updates[i, .SD, .SDcols=ctpt.id[-1]])
+    dist.name <- updates[i,]$dist
+    
+    tryCatch({
+      if(abs(round(sum(bin.vals),2)-1)<.01) {
+        fit <- FitFnInterval(probs  = bin.vals,     
+                             quants = ctpt.vals,
+                             dist.name = dist.name)
+        return(data.table(par.1 = fit[1],
+                          par.2 = fit[2],
+                          sse  = fit[3]))      
+      } else {
+        return(data.table(par.1 = NA_real_,
+                          par.2 = NA_real_,
+                          sse  = NA_real_))
+      }
+    },
+    error=function(cond){
+      return(data.table(par.1 = NA_real_,
+                        par.2 = NA_real_,
+                        sse  = NA_real_))
+    })
+  }
+  new.fits <- do.call(rbind,new.fits)
+  daily.set[dist=="gamma" & (fcast_date!=roll.date), 
+            c("par.1","par.2","sse"):=new.fits]
+  return(daily.set)
+}
+
+daily.set <- updateGammas(daily.set)
+
+
+#### Get Rolling Consensus
+# Theta-M
+
+
+ThetaM <- daily.set[,list(par.1=median(par.1, na.rm=TRUE),
+                          par.2=median(par.2, na.rm=TRUE),
+                          true.score=Outcome[1],
+                          dist=dist[1],
+                          ctpts=ctpts[1],
+                          N=.N),
+                    by=c("roll.date","ifp_id","type")]
+ThetaM[dist=="gamma", true.score:=true.score-as.numeric(roll.date)]
+
+# Score ThetaM
+ThetaM[dist=="beta", true.score:=true.score/100]
+GneitingCRPS("beta",40,73,.447,n=1e6)
+
+out <- foreach(i=1:nrow(ThetaM)) %dopar% {
+  ThetaM[i,GneitingCRPS(dist,par.1,par.2,true.score,n=1e6)]
+}
+
+ThetaM[,S.R:=unlist(out)]
+ThetaM[is.na(S.R),.N,]
+ThetaM[, S.R.r := rank(S.R),by=c("ifp_id","roll.date")]
+
+ThetaM[,sum(S.R.r==1)/(.N),by=c("type")]
+ThetaM[,sum(S.R.r==2)/(.N),by=c("type")]
+ThetaM[,sum(S.R.r==3)/(.N),by=c("type")]
+ThetaM[,mean(S.R.r),by=c("type","ifp_id")]
+
+fcasts[ifp_id=="1410-0",]
+ThetaM[ifp_id=="1410-0",]
+
+ThetaM.MD <- ThetaM[,list(S.R=mean(S.R)),by=c("ifp_id","type")]
+ThetaM.MD[,S.R.r:=rank(S.R),by=c("ifp_id")]
+
+library(ordinal)
+fm1 <- clm(ordered(S.R.r)~factor(type, levels=c("fixed","random","user")), data=ThetaM.MD)
+summary(fm1)
+
+# fixed < user
+# random ~< user
+
+save.image(file="IARPA.Rdata")
+```
+
+```{r, results='asis', cache=FALSE}
+load("../IARPA.Rdata")
+```
+
+## Forecaster Level
+
+### Effect of conditions (None)
+
+```{r, results='asis'}
+library(stargazer)
+library(lme4)
+tmp$type <- factor(tmp$type, levels=c("random","user","fixed"))
+mod1 <- lmer(y~factor(type) + (1|ifp_id) + (1|dist), data=tmp)
+tmp$type <- factor(tmp$type, levels=c("user","fixed","random"))
+mod2 <- lmer(y~factor(type) + (1|ifp_id) + (1|dist), data=tmp)
+stargazer(mod1, mod2, type="html")
+```
+
+## Consensus Level
+
+### Effect of conditions (Random < Fixed < User)
+
+
+```{r}
+
+ThetaM.MD <- ThetaM.MD[!(ifp_id %in% c("1530-6","1534-6","1536-6"))]
+
+
+```
+
+```{r, results='asis'}
+library(ordinal)
+
+
+xtabs(~ S.R.r+ type , data = ThetaM.MD[ifp_id%in%c(MDBS.ex[type=="random"]$ifp_id)][ifp_id!="1522-0"])
+
+
+
+fm1 <- clm(ordered(S.R.r)~factor(type, levels=c("fixed","random","user")), data=ThetaM.MD)
+fm2 <- clm(ordered(S.R.r)~factor(type, levels=c("random","user","fixed")), data=ThetaM.MD)
+fm3 <- clm(ordered(S.R.r)~factor(type, levels=c("user","fixed","random")), data=ThetaM.MD)
+stargazer(fm1, fm2, fm3, type="html")
+
+
+```
+
+```{r}
+pdata.fm1 <- as.data.table(xtabs(~ S.R.r+ type , data = ThetaM.MD))
+ggplot(data=pdata.fm1, aes(x=S.R.r, y=N, fill=type)) +
+  geom_bar(stat="identity", position="dodge", color="black")
+
+```
+
+
+```{r, eval=FALSE}
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Brier Scores
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+extremize <- function(dist,par.1,par.2,k=1) {
+  switch(dist,
+         gamma = {
+           mu <- par.1/par.2
+           v <- k*par.1/par.2^2
+           beta <- mu/v
+           alpha <- v*beta^2
+           list(alpha,beta)
+         },
+         normal = {
+           alpha <- par.1
+           beta <- par.2*k
+           list(alpha,beta)
+         },
+         beta = {
+           mu <- par.1/(par.1+par.2)
+           v <- k*(par.1*par.2)/((par.1+par.2)^2*(par.1+par.2+1))
+           alpha <- (((1-mu)/v)-(1/mu))*mu^2
+           beta <- (((1-mu)/v)-(1/mu))*mu*(1-mu)
+           list(alpha,beta)
+         })
+}
+
+blah <- function(dist,par.1,par.2) {
+  switch(dist,
+         gamma = {
+           mu <- par.1/par.2
+           v <- par.1/par.2^2
+           v
+         },
+         normal = {
+          par.2
+         },
+         beta = {
+           mu <- par.1/(par.1+par.2)
+           v <- (par.1*par.2)/((par.1+par.2)^2*(par.1+par.2+1))
+           v
+         })
+}
+
+
+BS <- function(dist, par.1, par.2, ctpt, true.score) {
+  round(2*(CDF(dist, ctpt, par.1, par.2)-(true.score<ctpt))^2,4)
+}
+vec.BS <- Vectorize(BS)
+
+# Fix date formats
+ThetaM[,ctpts:=gsub("/","-",ctpts)]
+#
+ThetaM[dist=="beta",true.score:=true.score/100]
+setkey(ThetaM,ifp_id)
+
+# get GJP cutpoints
+id <- unique(ThetaM$ifp_id)[2]
+id <- "1489-6"
+ThetaM[ifp_id==id,ctpts:="2015-03-01|2015-05-31"]
+
+id <- "1493-6"
+
+ThetaM[,unique(ctpts),by=ifp_id]
+id <- "1494-0"
+ThetaM[ifp_id==id, ctpts:="03/31/15"]
+
+
+MDBS <- foreach(id=unique(ThetaM$ifp_id)) %do% {
+  tryCatch({
+    score.cut <- unlist(ThetaM[id,][1,strsplit(ctpts,"|",fixed=TRUE)])
+    if(ThetaM[id,]$dist[1]=="gamma") {
+      if(grepl("^..-",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"-",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+      if(grepl("/",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"/",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+
+      score.cut <- unlist(sapply(score.cut, as.Date))
+      score.cut <- foreach(sc=score.cut, .combine="cbind") %do% {
+        matrix(sc-as.numeric(ThetaM[id,]$roll.date), ncol=1)
+      }
+    } else {
+      score.cut <- matrix(as.numeric(rep(score.cut, times=nrow(ThetaM[id,])), ncol=1))
+    }
+
+    out <- apply(score.cut,2, function(ct) {
+      ThetaM[id, list(dist=dist, 
+                      type=type,
+                      BS=vec.BS(dist, par.1, par.2, ct, true.score),
+                      N=N)]
+    })
+    out <- out[[1]]
+    out[,list(BS=round(mean(BS, na.rm=TRUE),4),
+              N=mean(N)),by=c("type","ifp_id","dist")] 
+  }, error = function(cond) {
+    data.table(type=NA,ifp_id=id,dist=ThetaM[id,]$dist[1],BS=NA,N=NA)
+  })
+}
+MDBS <- do.call(rbind,MDBS)
+
+MDBS[ifp_id=="1494-0"]
+
+ThetaM[,row.id:=1:nrow(ThetaM)]
+ThetaM[,v:=blah(dist,par.1,par.2),by=row.id]
+ThetaM[,sd(v),by=ifp_id]
+ThetaM[,c("alpha","beta"):=extremize(dist,par.1,par.2,1),by=row.id]
+MDBS.ex <- foreach(id=unique(ThetaM$ifp_id)) %dopar% {
+  tryCatch({
+    score.cut <- unlist(ThetaM[id,][1,strsplit(ctpts,"|",fixed=TRUE)])
+    if(ThetaM[id,]$dist[1]=="gamma") {
+      if(grepl("^..-",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"-",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+      if(grepl("/",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"/",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+
+      score.cut <- unlist(sapply(score.cut, as.Date))
+      score.cut <- foreach(sc=score.cut, .combine="cbind") %do% {
+        matrix(sc-as.numeric(ThetaM[id,]$roll.date), ncol=1)
+      }
+    } else {
+      score.cut <- matrix(as.numeric(rep(score.cut, times=nrow(ThetaM[id,])), ncol=1))
+    }
+
+    out <- apply(score.cut,2, function(ct) {
+      ThetaM[id, list(dist=dist, 
+                      type=type,
+                      BS=vec.BS(dist, alpha, beta, ct, true.score),
+                      N=N)]
+    })
+    out <- out[[1]]
+    out[,list(BS=round(mean(BS),4),
+              N=mean(N)),by=c("type","ifp_id","dist")] 
+  }, error = function(cond) {
+    data.table(type=NA,ifp_id=id,dist=ThetaM[id,]$dist[1],BS=NA,N=NA)
+  })
+}
+MDBS.ex <- do.call(rbind,MDBS.ex)
+
+tmp1 <- copy(MDBS.ex)
+tmp2 <- copy(MDBS.ex)
+tmp1[,inf:=1]
+tmp2[,inf:=3]
+MDBS.ex <- rbind(tmp1,tmp2)
+MDBS.ex[ifp_id=="1415-0"]
+ThetaM[ifp_id=="1415-0"]
+
+MDBS.ex[type=="random",]
+
+MDBS.ex[ifp_id=="1494-0"]
+ThetaM[ifp_id=="1494-0"]
+
+save.image("IARPA.Rdata")
+
+MDBS.ex[BS==0,]
+MDBS.ex[ifp_id=="1451-6",]
+ThetaM[ifp_id=="1451-6"]
+
+```
+
+```{r, eval=FALSE}
+rollers <- copy(all.fits)
+rollers <- rollers[type %in% c("rolling","rollingCtl")]
+
+# merge with ifp.data
+# ifp.data <- ifp.data[IFPID!="1419"]
+setkey(rollers, ifp_idx)
+setkey(ifp.data, IFPID)
+rollers <- ifp.data[rollers]
+
+names.bins <- grep("bin_", names(rollers), fixed=TRUE, value=TRUE)
+names.ctpts <- grep("ctpt_", names(rollers), fixed=TRUE, value=TRUE)
+
+# Convert date outcomes to numeric
+rollers[dist=="gamma" & Outcome!="",Outcome:=as.numeric(as.Date(Outcome))]
+rollers[, Outcome:=as.numeric(Outcome)]
+
+# Remove any foracsts without specified outcomes
+# fcasts <- fcasts[!is.na(Outcome),]
+# fcasts[,Outcome:=as.numeric(Outcome)]
+
+
+# Error
+rollers[,SS.tot:=2*apply(rollers[,.SD,.SDcols=names.ctpts],1,var,na.rm=TRUE)]
+rollers[, SS.fit := SS.tot - sse]
+rollers[, R.sq := 1-(sse/SS.tot)]
+
+# Convert date outcomes to numeric
+rollers[dist=="gamma",Outcome:=as.numeric(as.Date(Outcome))]
+rollers[,unique(Outcome),by=c("ifp_id")]
+
+# Remove any foracsts without specified outcomes
+rollers <- rollers[!is.na(Outcome),]
+rollers[,Outcome:=as.numeric(Outcome)]
+
+# Check outcome verses medians as sanity check
+rollers[,est.median:=QDF(dist,.5,par.1,par.2),by=1:nrow(rollers)]
+rollers[,list(median(est.median),Outcome[1]),by=ifp_id][4:36,round(.SD,3),.SDcols=c("V1","V2")]
+
+rollers[,list(est=round(median(est.median),digits=10),
+             out=round(median(Outcome), digits=2)),by=ifp_id]
+
+
+# Error
+rollers[,SS.tot:=2*apply(rollers[,.SD,.SDcols=names.ctpts],1,var,na.rm=TRUE)]
+rollers[, SS.fit := SS.tot - sse]
+rollers[, R.sq := 1-(sse/SS.tot)]
+
+# Drop 'unfittable'
+rollers <- rollers[sse!=42,]
+# Drop neg Rsq
+rollers <- rollers[R.sq>0,]
+
+# Adjust outcome (true.score) for date IFPs by date forecast made, and betas
+rollers[value_type=="date",true.score:=Outcome-as.numeric(as.Date(fcast_date))]
+rollers[value_type!="date",true.score:=Outcome]
+rollers[dist=="beta",true.score:=Outcome/100]
+
+# Drop forecasts made after close
+rollers <- rollers[as.Date(date_closed)>=as.Date(fcast_date)]
+
+# FOR SOME REASON MANY DATE FORECASTS HAVE NEGATIVE CUTPOINTS... WTF? FIND OUT WHY
+rollers <- rollers[!(dist=="gamma" & ctpt_0<0)]
+
+rollers <- rollers[!is.na(true.score)]
+rollers[,unique(ifp_id)]
+
+out <- foreach(i=1:nrow(rollers)) %dopar% {
+  rollers[i,GneitingCRPS(dist,par.1,par.2,true.score,n=1e6)]
+}
+rollers[,S.R:=unlist(out)]
+rollers[is.na(S.R),.N,by=c("type")]
+rollers[, S.R.r := scaleUnit(rank(S.R)),by=ifp_id]
+
+tmp.roll <- rollers[,mean(S.R),by=c("screen_name","ifp_id","type","dist")]
+tmp.roll[,y:=scaleUnit(rank(V1)),by=ifp_id]
+
+library(lme4)
+mod.roll <- lmer(y~factor(type) + (1|ifp_id), data=tmp.roll)
+summary(mod.roll)
+summary(lm(y~type,tmp.roll))
+
+tmp[,mean(y),by=c("type","ifp_id")]
+
+
+tmp[,median(y),by=c("type","ifp_id")]
+tmp[,median(y),by=c("type")]
+
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#### Consensus
+####~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+# First get 'Daily' forecasts
+getDailySet <- function(fcasts, 
+                        ifp,
+                        decay.recent=.5, 
+                        decay.min.days=3) {
+  myifp <- fcasts[ifp_id==ifp,]
+  bin.id <- paste0("bin_",1:13)
+  ctpt.id <- paste0("ctpt_",1:12)
+
+  min.date <- myifp[,min(as.Date(fcast_date))]
+  max.date <- myifp[,as.Date(date_closed[1])]
+
+
+  # Get distributions for every live day of the forecast
+  roll <- foreach(d=seq.Date(min.date,max.date,"day")) %dopar% {
+    # filter to forecasts made on or before d
+    tmp <- myifp[as.Date(fcast_date)<=d,]
+
+    # Keep only the most recent forecast by each user
+    setkey(tmp, fcast_date)
+    tmp <- tmp[idx %in% tmp[, list(last_fcast = tail(idx,n = 1)),
+               by=user_id]$last_fcast]
+
+    # get N by condition
+    N <- tmp[,.N,by=type]
+    # Keep only the newest forecasts
+    # Either by using the decay.recent parameter and keeping the most recent X% of forecasts
+    N[, n.keep.decay:=as.integer(N*decay.recent)]
+    # or the number of forecasts made in the last N days as specificed by decay.min.days
+    N[, n.keep.daymin:= tmp[,sum(as.Date(fcast_date)>(d-decay.min.days)),by=type]$V1]
+    # whichever is larger
+    N[, n.keep := max(n.keep.decay, n.keep.daymin),by=type]
+    # unless N <= 5
+    N[, n.keep:=ifelse(N<=5,N,n.keep)]
+    N[, first:=(N-n.keep)+1]
+    N[, last:=N]
+    setkey(N,type)
+    # print(N)
+    tmp2 <- tmp[0,]
+    for(condition in N$type) {
+        tmp2 <- rbind(tmp2,tmp[type==condition,][N[condition,]$first:N[condition,]$last,])    
+    }
+    tmp2[,.N,by=type]
+    tmp <- tmp2
+    tmp[,roll.date:=d]
+  }
+  do.call(rbind,roll)
+}
+
+daily.set <- foreach(ifp=unique(rollers$ifp_id), .combine="rbind") %do% {
+  getDailySet(rollers, ifp)
+}
+
+daily.set[,fcast_date:=as.Date(fcast_date)]
+
+updateGammas <- function(daily.set, n.bins=20) {
+  # Subset to forecasts that need to be updated
+  # forecasts made on the same day as the roll date are fine
+  # and only gammas are updated
+  updates <- daily.set[dist=="gamma" & (fcast_date!=roll.date),]
+
+  # Define refitting cutpoints for each forecast
+  ctpts <- data.table(matrix(NA_real_, nrow=nrow(updates), ncol=n.bins))
+  bins <- copy(ctpts)
+  bin.id <- paste0("bin_",1:20)
+  ctpt.id <- paste0("ctpt_",1:20)
+  setnames(ctpts, ctpt.id)
+  setnames(bins, bin.id)
+  updates <- cbind(updates[,list(idx,ifp_id,dist,par.1,par.2,fcast_date, roll.date, type)],bins,ctpts)  
+  updates[, row.id:=1:.N]  
+
+  # Obtain probabilities for each bin
+  updates[,c(bin.id):=as.list((pgamma(seq(roll.date-fcast_date, 
+                                       qgamma(.9999,par.1,par.2), 
+                                       length=20),par.1,par.2) - 
+                                pgamma(roll.date-fcast_date, par.1, par.2)) / 
+                                as.numeric(1-pgamma(roll.date-fcast_date, par.1, par.2))),
+       by=row.id]
+
+  # Convert to interval probabilities     
+  updates[,c(bin.id):=as.list(updates[,bin.id,with=FALSE] - 
+                              cbind(0,updates[,bin.id[-length(bin.id)],with=FALSE]))]
+
+  # Get cutpoints
+  updates[,c(ctpt.id):=as.list(seq(as.numeric(roll.date-fcast_date), 
+                                   qgamma(.9999,par.1,par.2), 
+                                   length=20)-as.numeric(roll.date-fcast_date)),
+           by=row.id]
+
+  # Drop unnecessary 1st ctpt/bin
+  updates[,bin_1:=NULL]
+  updates[,ctpt_1:=NULL]
+
+  # refit parameters to new, renormed probabilities
+  new.fits <- foreach(i=1:nrow(updates)) %dopar% {
+    bin.vals <- unlist(updates[i, .SD, .SDcols=bin.id[-1]])
+    ctpt.vals <- unlist(updates[i, .SD, .SDcols=ctpt.id[-1]])
+    dist.name <- updates[i,]$dist
+    
+    tryCatch({
+      if(abs(round(sum(bin.vals),2)-1)<.01) {
+        fit <- FitFnInterval(probs  = bin.vals,     
+                             quants = ctpt.vals,
+                             dist.name = dist.name)
+        return(data.table(par.1 = fit[1],
+                          par.2 = fit[2],
+                          sse  = fit[3]))      
+      } else {
+        return(data.table(par.1 = NA_real_,
+                          par.2 = NA_real_,
+                          sse  = NA_real_))
+      }
+    },
+    error=function(cond){
+      return(data.table(par.1 = NA_real_,
+                        par.2 = NA_real_,
+                        sse  = NA_real_))
+    })
+  }
+  new.fits <- do.call(rbind,new.fits)
+  daily.set[dist=="gamma" & (fcast_date!=roll.date), 
+            c("par.1","par.2","sse"):=new.fits]
+  return(daily.set)
+}
+
+daily.set <- updateGammas(daily.set)
+
+
+ThetaM.roll <- daily.set[,list(par.1=median(par.1, na.rm=TRUE),
+                          par.2=median(par.2, na.rm=TRUE),
+                          true.score=Outcome[1],
+                          dist=dist[1],
+                          ctpts=ctpts[1],
+                          N=.N),
+                    by=c("roll.date","ifp_id","type")]
+ThetaM.roll[dist=="gamma", true.score:=true.score-as.numeric(roll.date)]
+
+# Score ThetaM
+out.roll <- foreach(i=1:nrow(ThetaM.roll)) %dopar% {
+  ThetaM.roll[i,GneitingCRPS(dist,par.1,par.2,true.score,n=1e6)]
+}
+
+ThetaM.roll[,S.R:=unlist(out)]
+ThetaM.roll[is.na(S.R),.N,]
+ThetaM.roll[, S.R.r := rank(S.R),by=c("ifp_id","roll.date")]
+
+ThetaM.roll[,sum(S.R.r==1)/(.N),by=c("type")]
+ThetaM.roll[,sum(S.R.r==2)/(.N),by=c("type")]
+ThetaM.roll[,sum(S.R.r==3)/(.N),by=c("type")]
+ThetaM.roll[,mean(S.R.r),by=c("type","ifp_id")]
+
+ThetaM.MD.roll <- ThetaM.roll[,list(S.R=mean(S.R)),by=c("ifp_id","type")]
+ThetaM.MD.roll[,S.R.r:=rank(S.R),by=c("ifp_id")]
+
+fm1.roll <- clm(ordered(S.R.r)~factor(type), data=ThetaM.MD.roll)
+summary(fm1.roll)
+
+xtabs(~S.R.r+type, data=ThetaM.MD.roll)
+save.image(file="IARPA.Rdata")
+
+
+ThetaM.roll[,row.id:=1:nrow(ThetaM.roll)]
+ThetaM.roll[,v:=blah(dist,par.1,par.2),by=row.id]
+ThetaM.roll[,sd(v),by=ifp_id]
+ThetaM.roll[,c("alpha","beta"):=extremize(dist,par.1,par.2,1),by=row.id]
+
+ThetaM.roll[ifp_id=="1489-6",ctpts:="2015-03-01|2015-04-30"]
+
+id <- "1489-6"
+
+MDBS.roll.ex <- foreach(id=unique(ThetaM.roll$ifp_id)) %dopar% {
+  tryCatch({
+    score.cut <- unlist(ThetaM.roll[id,][1,strsplit(ctpts,"|",fixed=TRUE)])
+    if(ThetaM.roll[id,]$dist[1]=="gamma") {
+      if(grepl("^..-",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"-",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+      if(grepl("/",score.cut[1])) {
+        score.cut <- sapply(score.cut, function(s) {
+          tmp <- unlist(strsplit(s,"/",fixed="TRUE"))
+          paste(paste0("20",tmp[3]),
+                ifelse(nchar(tmp[1])==1,paste0("0",tmp[1]),tmp[1]),
+                ifelse(nchar(tmp[2])==1,paste0("0",tmp[2]),tmp[2]),
+                sep="-")
+        })
+      }
+
+      score.cut <- unlist(sapply(score.cut, as.Date))
+      score.cut <- foreach(sc=score.cut, .combine="cbind") %do% {
+        matrix(sc-as.numeric(ThetaM.roll[id,]$roll.date), ncol=1)
+      }
+    } else {
+      score.cut <- matrix(as.numeric(rep(score.cut, times=nrow(ThetaM.roll[id,])), ncol=1))
+    }
+
+    out <- apply(score.cut,2, function(ct) {
+      ThetaM.roll[id, list(dist=dist, 
+                      type=type,
+                      BS=vec.BS(dist, alpha, beta, ct, true.score),
+                      N=N)]
+    })
+    out <- out[[1]]
+    out[,list(BS=round(mean(BS),4),
+              N=mean(N)),by=c("type","ifp_id","dist")] 
+  }, error = function(cond) {
+    data.table(type=NA,ifp_id=id,dist=ThetaM.roll[id,]$dist[1],BS=NA,N=NA)
+  })
+}
+MDBS.roll.ex <- do.call(rbind,MDBS.roll.ex)
+
+tmp1 <- copy(MDBS.roll.ex)
+tmp2 <- copy(MDBS.roll.ex)
+tmp1[,inf:=1]
+tmp2[,inf:=3]
+MDBS.roll.ex <- rbind(tmp1,tmp2)
+
+
+save.image(file="IARPA.Rdata")
+
+
+```
+
+
+

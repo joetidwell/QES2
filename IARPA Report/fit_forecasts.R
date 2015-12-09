@@ -6,7 +6,9 @@ library(ggplot2)
 library(foreach)
 library(doMC)
 library("multicore", quietly=TRUE)
-registerDoMC(max(multicore:::detectCores()-6,2)) # use all cores minus 2
+# registerDoMC(max(multicore:::detectCores()-2,2)) # use all cores minus 2
+registerDoMC(28) # use all cores minus 2
+
 
 source("~/ACE/global_vars.R")
 source(file.path(kRootPath, "util", "load_data.R"), chdir=T)

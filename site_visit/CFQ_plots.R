@@ -13,7 +13,7 @@ options(stringsAsFactors = FALSE)
 path.mydata <- "~/git/QES2/data"
 
 # Load data from grofo
-load(".RData")
+load(file.path(path.mydata,"tmp.RData"))
 
 p <- ggplot(data=ThetaM, aes(x=type, y=S.R.r)) +
   geom_boxplot(aes(color=dist), outlier.size=0, notch=TRUE) +
@@ -46,6 +46,47 @@ ggplot(data=MDBS[is.finite(BS),list(BS=mean(BS)),by=c("ifp_id","dist")], aes(x=i
   labs(x="IFP", y="Mean Daily Brier Score") +
   scale_color_discrete(name="Distribution")
 
+cond1h <- c(NaN,NaN,.159,.714,.202,.227,.451,.168,.323,.382,.188,.137,.221,.099,.886,.160,.546,.164,.182,.688,.345,.192,.236,.323,.277,.289,.427,.127,.210,.190,.768,.658,.502,.768,.924,.462)
+
+tmp <- MDBS[,mean(BS,na.rm=TRUE),by=ifp_id]
+setkey(tmp,V1)
+
+MDBS[,ifp_id:=factor(ifp_id,levels=tmp$ifp_id)]
+blerg <- MDBS[is.finite(BS),list(BS=mean(BS)),by=c("ifp_id","dist")]
+tmp[,V1:=cond1h]
+tmp[,BS:=V1]
+tmp[,V1:=NULL]
+tmp$dist <- "cond1h"
+blerg <- rbind(blerg,tmp)
+blerg[,dist:=factor(dist,levels=c("beta","gamma","normal",""))]
+blerg<- blerg[!is.nan(BS)]
+blerg[dist!="",dist:="Consensus"]
+blerg[is.na(dist),dist:="ULinOP"]
+blerg[,dist:=ordered(dist,levels=c("UlinOP","Consensus"))]
+
+ggplot(data=blerg, aes(x=ifp_id, y=BS, color=dist)) +
+  geom_hline(yintercept=.5) +
+  geom_point(size=5.4, color="black") +
+  geom_point(data=blerg[dist==""], aes(x=ifp_id, y=BS), color="steelblue",size=5) +
+  geom_point(data=blerg[dist!=""], aes(x=ifp_id, y=BS), color="firebrick",size=5) +
+  ylim(0,2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x="Forecasting Question", y="Mean Daily Brier Score") 
+  # scale_color_manual(name="Blah", values=c("firebrick","firebrick","firebrick","white"))
+
+ggplot(data=blerg, aes(x=ifp_id, y=BS, color=dist)) +
+  geom_hline(yintercept=.5) +
+  geom_point(size=5.4, color="black") +
+  # geom_point(data=blerg[dist==""], aes(x=ifp_id, y=BS), color="steelblue",size=5) +
+  # geom_point(data=blerg[dist!=""], aes(x=ifp_id, y=BS), color="firebrick",size=5) +
+  geom_point(size=5) +
+  ylim(0,2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x="Forecasting Question", y="Mean Daily Brier Score") +
+  scale_color_manual(name="Source",values=c("firebrick","steelblue"))
+
+
+
 tmp <- MDBS.ex[,mean(BS,na.rm=TRUE),by=ifp_id]
 setkey(tmp,V1)
 MDBS.ex[,ifp_id:=factor(ifp_id,levels=tmp$ifp_id)]
@@ -62,22 +103,34 @@ blah
 library(reshape2)
 blah <- melt(blah)
 tmp <- blah[,mean(value, na.rm=TRUE),by=ifp_id]
+blerg
+
 setkey(tmp,V1)
 blah[,ifp_id:=factor(ifp_id,levels=tmp$ifp_id)]
 blah[,col:=as.numeric(variable)]
 blah[col==2,col:=1.5]
 blah[col==3,col:=3]
 blah[col==4,col:=5]
+
+blerg2 <- blerg[dist=="ULinOP"]
+blerg2[,value:=BS]
+blerg2[,variable:=dist]
+
 ggplot(data=blah[is.finite(value) & col!=1.5,], aes(x=ifp_id, y=value, color=variable)) +
   geom_hline(yintercept=.5) +
   # geom_point(size=5.4, color="black") +
+  geom_point(data=blerg2,size=5,color="black") +
+  geom_point(data=blerg2,size=4.6,color="white") +
   geom_point(size=5) +
   # geom_line(size=1.25) +
   ylim(0,2) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
   labs(x="IFP", y="Mean Daily Brier Score") +
-  scale_color_manual(name="Variance\nInflation\nFactor", values=c("#deebf7","#9ecae1","#3182bd"))
+  scale_color_manual(name="Variance\nInflation\nFactor", values=c("mistyrose","lightpink","firebrick"))
+# scale_color_manual(name="Variance\nInflation\nFactor", values=c("#deebf7","#9ecae1","#3182bd"))
 
+
+blah
 
 
 MDBS[ifp_id=="1432-0"]
